@@ -28,7 +28,7 @@ class NFMDemodulator: Demodulator {
         self.squelchLevel = powf(squelchLevel, 2) * 0.01
     }
 
-    func demodulate(iqSamples: [Float]) -> [Float] {
+    func demodulate(frequencyBand iqSamples: [Float]) -> [Float] {
         // --- STEP 1: Low-Pass Filter and Decimate ---
         // We'll use a simple multi-stage decimation to get closer to our audio sample rate.
         let decimationFactor1 = 4

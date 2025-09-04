@@ -27,9 +27,6 @@ class DSPEngine: ObservableObject {
     private let smoothingFactor: Float = 0.05
     
     // --- Reusable Buffers ---
-    private var floatSamples: [Float]
-    private var phaseRamp: [Float]
-    private var phasorReal, phasorImag, chunkReal, chunkImag, shiftedReal, shiftedImag: [Float]
     private var fftInputReal: [Float]
     private var fftInputImag: [Float]
     private var fftOutputReal: [Float]
@@ -37,15 +34,20 @@ class DSPEngine: ObservableObject {
     private var magSquared: [Float]
     private var dbMagnitudes: [Float]
     private var finalMagnitudes: [Float]
-    
+    private var realSquared: [Float]
+    private var imagSquared: [Float]
+    private var floatSamples: [Float]
+       private var phaseRamp: [Float]
+       private var phasorReal, phasorImag, chunkReal, chunkImag, shiftedReal, shiftedImag: [Float]
     private var demodulator: Demodulator
     private let audioManager = AudioManager()
     private var vfoBandwidthHz: Double = 12_500.0
-       private var squelchLevel: Float = 0.2
-    
+    private var squelchLevel: Float = 0.2
+    private var sampleRateHz: Double = 2_048_000.0
+
     private var vfoPhase: Float = 0.0
-        private var vfoPhaseIncrement: Float = 0.0
-    
+    private var vfoPhaseIncrement: Float = 0.0
+
     private var sampleBuffer = Data()
 
     
@@ -56,12 +58,16 @@ class DSPEngine: ObservableObject {
         self.fftSize = 4096
         self.demodulator = NFMDemodulator()
         let log2n = vDSP_Length(log2(Float(fftSize)))
-        fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            fatalError("Failed to create FFT setup")
+        }
+        fftSetup = setup
         
         spectrum = [Float](repeating: -120.0, count: fftSize)
-        
-        floatSamples = [Float](repeating: 0.0, count: 65536)
+
         phaseRamp = [Float](repeating: 0.0, count: fftSize)
+        realSquared = [Float](repeating: 0.0, count: fftSize)
+        imagSquared = [Float](repeating: 0.0, count: fftSize)
         phasorReal = [Float](repeating: 0.0, count: fftSize)
         phasorImag = [Float](repeating: 0.0, count: fftSize)
         chunkReal = [Float](repeating: 0.0, count: fftSize)
@@ -75,6 +81,7 @@ class DSPEngine: ObservableObject {
         magSquared = [Float](repeating: 0.0, count: fftSize)
         dbMagnitudes = [Float](repeating: 0.0, count: fftSize)
         finalMagnitudes = [Float](repeating: 0.0, count: fftSize)
+        floatSamples = [Float](repeating: 0.0, count: fftSize)
         waterfallData = Array(repeating: spectrum, count: waterfallHeight)
         
     }
@@ -146,13 +153,12 @@ class DSPEngine: ObservableObject {
                 let start = i * fftSize * 2
                 let end = start + fftSize * 2
                 let chunk = Array(floatSamples[start..<end])
-                
-                let shiftedSamples = performVFO(on: chunk)
-                let fftMagnitudes = performFFT(on: shiftedSamples) // Use shifted for centered display
-                let audioSamples = demodulator.demodulate(iqSamples: shiftedSamples)
-                
+
+                let fftMagnitudes = performFFT(on: chunk)
+                let audioSamples = demodulator.demodulate(frequencyBand: extractFrequencyBand(from: fftMagnitudes))
+
                 audioManager.playSamples(audioSamples)
-                
+
                 guard !fftMagnitudes.isEmpty else { continue }
                 averagingBuffer.append(fftMagnitudes)
                 if averagingBuffer.count > averagingCount { averagingBuffer.removeFirst() }
@@ -160,7 +166,13 @@ class DSPEngine: ObservableObject {
             
             // --- FINAL UI UPDATE (Now guaranteed to run if we processed data) ---
             if !averagingBuffer.isEmpty {
-                var averagedMagnitudes = averagingBuffer.last! // Use the most recent average
+                // Compute actual average across all buffers in averagingBuffer
+                var averagedMagnitudes = [Float](repeating: 0.0, count: averagingBuffer[0].count)
+                for buffer in averagingBuffer {
+                    vDSP.add(averagedMagnitudes, buffer, result: &averagedMagnitudes)
+                }
+                let count = Float(averagingBuffer.count)
+                vDSP.divide(averagedMagnitudes, count, result: &averagedMagnitudes)
                 
                 var newMin = self.dynamicMinDb, newMax = self.dynamicMaxDb
                 if self.autoScaleEnabled {
@@ -185,88 +197,86 @@ class DSPEngine: ObservableObject {
         }
     
     public func updateParameters(fftSize: Int, averagingCount: Int, waterfallHeight: Int) {
-            // Run this on the DSP queue to prevent race conditions.
+            // Use a semaphore to ensure parameter updates complete before resuming processing
+            let semaphore = DispatchSemaphore(value: 0)
+
             dspQueue.async {
-                // Stop any ongoing processing
-                self.isProcessing = true
-                
                 // Clear all data buffers
                 self.averagingBuffer.removeAll()
                 self.pendingDataLock.lock()
                 self.pendingData.removeAll()
                 self.pendingDataLock.unlock()
-                
+
                 // Update waterfall height if needed
                 if waterfallHeight != self.waterfallHeight {
                     self.waterfallHeight = waterfallHeight
                     let emptySpectrum = [Float](repeating: -120.0, count: self.fftSize)
                     self.waterfallData = Array(repeating: emptySpectrum, count: self.waterfallHeight)
                 }
-                
+
                 // Update averaging count
                 self.averagingCount = averagingCount
-                
+
                 // Re-initialize FFT and all related buffers IF the size changed
                 if fftSize != self.fftSize {
                     vDSP_destroy_fftsetup(self.fftSetup)
                     self.fftSize = fftSize
-                    
+
                     let log2n = vDSP_Length(log2(Float(self.fftSize)))
-                    self.fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
-                    
+                    guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+                        fatalError("Failed to create FFT setup during parameter update")
+                    }
+                    self.fftSetup = setup
+
                     // Re-allocate all buffers with the new size
                     self.phaseRamp = [Float](repeating: 0.0, count: self.fftSize)
                     self.phasorReal = [Float](repeating: 0.0, count: self.fftSize)
-                    // ... (re-allocate all other buffers) ...
-                    self.phasorImag = [Float](repeating: 0.0, count: self.fftSize); self.chunkReal = [Float](repeating: 0.0, count: self.fftSize); self.chunkImag = [Float](repeating: 0.0, count: self.fftSize); self.shiftedReal = [Float](repeating: 0.0, count: self.fftSize); self.shiftedImag = [Float](repeating: 0.0, count: self.fftSize); self.fftInputReal = [Float](repeating: 0.0, count: self.fftSize); self.fftInputImag = [Float](repeating: 0.0, count: self.fftSize); self.fftOutputReal = [Float](repeating: 0.0, count: self.fftSize); self.fftOutputImag = [Float](repeating: 0.0, count: self.fftSize); self.magSquared = [Float](repeating: 0.0, count: self.fftSize); self.dbMagnitudes = [Float](repeating: 0.0, count: self.fftSize); self.finalMagnitudes = [Float](repeating: 0.0, count: self.fftSize)
-                    
+                    self.phasorImag = [Float](repeating: 0.0, count: self.fftSize)
+                    self.chunkReal = [Float](repeating: 0.0, count: self.fftSize)
+                    self.chunkImag = [Float](repeating: 0.0, count: self.fftSize)
+                    self.shiftedReal = [Float](repeating: 0.0, count: self.fftSize)
+                    self.shiftedImag = [Float](repeating: 0.0, count: self.fftSize)
+                    self.fftInputReal = [Float](repeating: 0.0, count: self.fftSize)
+                    self.fftInputImag = [Float](repeating: 0.0, count: self.fftSize)
+                    self.fftOutputReal = [Float](repeating: 0.0, count: self.fftSize)
+                    self.fftOutputImag = [Float](repeating: 0.0, count: self.fftSize)
+                    self.magSquared = [Float](repeating: 0.0, count: self.fftSize)
+                    self.dbMagnitudes = [Float](repeating: 0.0, count: self.fftSize)
+                    self.finalMagnitudes = [Float](repeating: 0.0, count: self.fftSize)
+                    self.realSquared = [Float](repeating: 0.0, count: self.fftSize)
+                    self.imagSquared = [Float](repeating: 0.0, count: self.fftSize)
+
                     // Update published data to the correct size
                     DispatchQueue.main.async {
                         self.spectrum = [Float](repeating: -120.0, count: self.fftSize)
                         self.waterfallData = Array(repeating: self.spectrum, count: self.waterfallHeight)
                     }
                 }
-                
-                // Re-enable processing
-                self.isProcessing = false
-            }
-        }
-    
-    
-    // --- HELPER FUNCTIONS MOVED BACK TO CLASS SCOPE ---
-    
-    private func performVFO(on samples: [Float]) -> [Float] {
-        let sampleCount = self.fftSize
-        let sampleCount32 = Int32(sampleCount)
-        
-        // Phase calculation...
-        vDSP_vramp(&self.vfoPhase, &self.vfoPhaseIncrement, &self.phaseRamp, 1, vDSP_Length(sampleCount))
-        self.vfoPhase = self.phaseRamp[sampleCount - 1].truncatingRemainder(dividingBy: 2 * .pi)
-        var N: Int32 = sampleCount32
-        vvcosf(&self.phasorReal, &self.phaseRamp, &N)
-        vvsinf(&self.phasorImag, &self.phaseRamp, &N)
-        
-        // Optimized De-interleaving (The big performance win)
-        cblas_scopy(sampleCount32, samples, 2, &self.chunkReal, 1)
-        samples.withUnsafeBufferPointer { samplesBuffer in
-            let imaginarySamplesPointer = samplesBuffer.baseAddress!.advanced(by: 1)
-            cblas_scopy(sampleCount32, imaginarySamplesPointer, 2, &self.chunkImag, 1)
-        }
-        
-        // Complex Multiplication...
-        var chunkSplitComplex = DSPSplitComplex(realp: &self.chunkReal, imagp: &self.chunkImag)
-        var phasorSplitComplex = DSPSplitComplex(realp: &self.phasorReal, imagp: &self.phasorImag)
-        var shiftedSplitComplex = DSPSplitComplex(realp: &self.shiftedReal, imagp: &self.shiftedImag)
-        vDSP_zvmul(&chunkSplitComplex, 1, &phasorSplitComplex, 1, &shiftedSplitComplex, 1, vDSP_Length(sampleCount), 1)
-        
-        // Simple, compiling re-interleaving loop.
-        var shiftedSamples = [Float](repeating: 0.0, count: samples.count)
-        for i in 0..<sampleCount {
-            shiftedSamples[i * 2] = self.shiftedReal[i]
-            shiftedSamples[i * 2 + 1] = self.shiftedImag[i]
-        }
 
-        return shiftedSamples
+                semaphore.signal()
+            }
+
+            // Wait for parameter update to complete
+            semaphore.wait()
+        }
+    
+    
+    // --- HELPER FUNCTIONS ---
+
+    private func extractFrequencyBand(from fftMagnitudes: [Float]) -> [Float] {
+        // Calculate the frequency band based on tuning offset and bandwidth
+        let centerFrequencyRatio = Double(tuningOffset)
+        let bandwidthRatio = vfoBandwidthHz / sampleRateHz
+
+        // Convert ratios to bin indices
+        let centerBin = Int(centerFrequencyRatio * Double(fftSize))
+        let halfBandwidthBins = Int(bandwidthRatio * Double(fftSize) / 2.0)
+
+        let startBin = max(0, centerBin - halfBandwidthBins)
+        let endBin = min(fftSize, centerBin + halfBandwidthBins)
+
+        // Extract the frequency band from the FFT magnitudes
+        return Array(fftMagnitudes[startBin..<endBin])
     }
     
     private func performFFT(on samples: [Float]) -> [Float] {
@@ -274,41 +284,47 @@ class DSPEngine: ObservableObject {
         let sampleCount32 = Int32(self.fftSize)
 
         // --- FIX: Replace de-interleaving loop with cblas_scopy ---
-        cblas_scopy(sampleCount32, samples, 2, &self.fftInputReal, 1)
-        samples.withUnsafeBufferPointer { samplesBuffer in
-            let imaginarySamplesPointer = samplesBuffer.baseAddress!.advanced(by: 1)
-            cblas_scopy(sampleCount32, imaginarySamplesPointer, 2, &self.fftInputImag, 1)
-        }
-        
-        // The rest of the FFT process is the same, using the now-populated buffers
         self.fftInputReal.withUnsafeMutableBufferPointer { realp in
-            self.fftInputImag.withUnsafeMutableBufferPointer { imagp in
-                self.fftOutputReal.withUnsafeMutableBufferPointer { fftOutputRealp in
-                    self.fftOutputImag.withUnsafeMutableBufferPointer { fftOutputImagp in
-                        var input = DSPSplitComplex(realp: realp.baseAddress!, imagp: imagp.baseAddress!)
-                        var output = DSPSplitComplex(realp: fftOutputRealp.baseAddress!, imagp: fftOutputImagp.baseAddress!)
-                        let log2n = vDSP_Length(log2(Float(self.fftSize)))
-                        vDSP_fft_zop(fftSetup, &input, 1, &output, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                    self.fftInputImag.withUnsafeMutableBufferPointer { imagp in
+                        self.fftOutputReal.withUnsafeMutableBufferPointer { fftOutputRealp in
+                            self.fftOutputImag.withUnsafeMutableBufferPointer { fftOutputImagp in
+                                
+                                // Create DSPSplitComplex structures that vDSP functions require. These are essentially
+                                // structs holding pointers to the real and imaginary parts of a complex signal.
+                                var input = DSPSplitComplex(realp: realp.baseAddress!, imagp: imagp.baseAddress!)
+                                var output = DSPSplitComplex(realp: fftOutputRealp.baseAddress!, imagp: fftOutputImagp.baseAddress!)
+
+                                // --- FIX: Replace deprecated cblas_scopy with vDSP_ctoz ---
+                                // This single function de-interleaves the [I, Q, I, Q] samples into separate
+                                // real (I) and imaginary (Q) buffers, which is what the FFT needs.
+                                // It's more efficient and the correct, modern approach.
+                                samples.withUnsafeBytes { (samplesPtr: UnsafeRawBufferPointer) in
+                                    let complexPtr = samplesPtr.baseAddress!.assumingMemoryBound(to: DSPComplex.self)
+                                    vDSP_ctoz(complexPtr, 2, &input, 1, vDSP_Length(self.fftSize))
+                                }
+
+                                // Perform the forward FFT.
+                                let log2n = vDSP_Length(log2(Float(self.fftSize)))
+                                vDSP_fft_zop(fftSetup, &input, 1, &output, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                            }
+                        }
                     }
                 }
-            }
-        }
-        
-        var realSquared = [Float](repeating: 0.0, count: fftSize)
-            vDSP.square(self.fftOutputReal, result: &realSquared)
-            var imagSquared = [Float](repeating: 0.0, count: fftSize)
-            vDSP.square(self.fftOutputImag, result: &imagSquared)
-            vDSP.add(realSquared, imagSquared, result: &self.magSquared)
-            let zero: Float = 0.000001
-            vDSP.add(zero, self.magSquared, result: &self.magSquared)
-            vDSP.convert(power: self.magSquared, toDecibels: &self.dbMagnitudes, zeroReference: 1.0)
-            let halfSize = self.fftSize / 2
-            let firstHalf = self.dbMagnitudes[halfSize..<self.fftSize]
-            let secondHalf = self.dbMagnitudes[0..<halfSize]
-            self.finalMagnitudes.replaceSubrange(0..<halfSize, with: firstHalf)
-            self.finalMagnitudes.replaceSubrange(halfSize..<self.fftSize, with: secondHalf)
-            
-            return self.finalMagnitudes
+        vDSP.square(self.fftOutputReal, result: &self.realSquared)
+        vDSP.square(self.fftOutputImag, result: &self.imagSquared)
+        vDSP.add(self.realSquared, self.imagSquared, result: &self.magSquared)
+
+        let zero: Float = 0.000001
+        vDSP.add(zero, self.magSquared, result: &self.magSquared)
+        vDSP.convert(power: self.magSquared, toDecibels: &self.dbMagnitudes, zeroReference: 1.0)
+
+        let halfSize = self.fftSize / 2
+        let firstHalf = self.dbMagnitudes[halfSize..<self.fftSize]
+        let secondHalf = self.dbMagnitudes[0..<halfSize]
+        self.finalMagnitudes.replaceSubrange(0..<halfSize, with: firstHalf)
+        self.finalMagnitudes.replaceSubrange(halfSize..<self.fftSize, with: secondHalf)
+
+        return self.finalMagnitudes
     }
     
     
@@ -322,12 +338,16 @@ class DSPEngine: ObservableObject {
             // Pass the updated value to the demodulator
             updateDemodulatorParameters()
         }
+
+    public func setSampleRate(_ sampleRate: Double) {
+            self.sampleRateHz = sampleRate
+            // Pass the updated value to the demodulator
+            updateDemodulatorParameters()
+        }
     
     private func updateDemodulatorParameters() {
-            // TODO: Pass the real sample rate from RadioView here
-            let currentSampleRate = 2_048_000.0
             demodulator.update(bandwidthHz: vfoBandwidthHz,
-                               sampleRateHz: currentSampleRate,
+                               sampleRateHz: sampleRateHz,
                                squelchLevel: squelchLevel)
         }
     
