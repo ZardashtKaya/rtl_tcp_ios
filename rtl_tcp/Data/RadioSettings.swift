@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct RadioSettings {
+struct RadioSettings: Equatable{
     // Default to a common FM radio station frequency
     var frequencyMHz: Double = 433.0
 

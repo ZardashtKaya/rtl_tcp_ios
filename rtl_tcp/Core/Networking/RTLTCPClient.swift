@@ -60,12 +60,10 @@ class RTLTCPClient: ObservableObject {
     private func receive() {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] (data, context, isComplete, error) in
             if let receivedData = data, !receivedData.isEmpty {
-                            // ----> CHANGE THIS SECTION <----
-                            // Instead of counting bytes, we now pass the data to our callback.
-                            // The main thread is not needed here, as the DSP will run on a background thread.
-                            self?.onDataReceived?(receivedData)
-                            // -----------------------------
-                        }
+                // ----> ADD: Debug logging <----
+//                print("📡 Received \(receivedData.count) bytes")
+                self?.onDataReceived?(receivedData)
+            }
             if let error = error {
                 print("❌ Receive error: \(error.localizedDescription)")
                 self?.disconnect()

@@ -24,7 +24,7 @@ class RadioViewModel: ObservableObject {
     
     @Published var selectedFFTSize: Int = 4096
     @Published var averagingCount: Int = 10
-    @Published var waterfallHeight: Int = 200
+    @Published var waterfallHeight:  Int = 200
     
     @Published var tuningOffset: CGFloat = 0.5
     @Published var vfoBandwidthHz: Double = 12_500.0
@@ -38,47 +38,97 @@ class RadioViewModel: ObservableObject {
     init() {
         // This is the replacement for the long .onChange modifier chain.
         // We subscribe to changes in our own properties and trigger the appropriate actions.
-        
-        $settings
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main) // Prevent sending too many commands
-            .sink { [weak self] newSettings in
-                self?.client.setFrequency(UInt32(newSettings.frequencyMHz * 1_000_000))
-                self?.client.setAgcMode(isOn: newSettings.isAgcOn)
-                self?.client.setBiasTee(isOn: newSettings.isBiasTeeOn)
-                self?.client.setOffsetTuning(isOn: newSettings.isOffsetTuningOn)
-                if !newSettings.isAgcOn {
-                    self?.client.setTunerGain(byIndex: newSettings.tunerGainIndex)
-                }
-            }
-            .store(in: &cancellables)
-            
-        $selectedSampleRate
-            .sink { [weak self] rate in self?.client.setSampleRate(rate.rawValue) }
-            .store(in: &cancellables)
-            
-        $isAutoScaleEnabled
-            .sink { [weak self] enabled in self?.dspEngine.setAutoScale(isOn: enabled) }
-            .store(in: &cancellables)
-            
-        $tuningOffset
-            .sink { [weak self] offset in self?.dspEngine.setTuningOffset(Float(offset)) }
-            .store(in: &cancellables)
-            
-        $vfoBandwidthHz
-            .sink { [weak self] bandwidth in self?.dspEngine.setVFO(bandwidthHz: bandwidth) }
-            .store(in: &cancellables)
-            
-        $squelchLevel
-            .sink { [weak self] level in self?.dspEngine.setSquelch(level: level) }
-            .store(in: &cancellables)
-            
-        // Combine the DSP parameters to trigger a single update
-        Publishers.CombineLatest3($selectedFFTSize, $averagingCount, $waterfallHeight)
-            .sink { [weak self] fft, avg, height in
-                self?.callUpdateParameters(fftSize: fft, averagingCount: avg, waterfallHeight: height)
-            }
-            .store(in: &cancellables)
+        setupBindingsAsync()
     }
+    
+    public func testDemodulation() {
+        dspEngine.testDemodulationChain()
+    }
+    
+    public func playTestAudio(_ samples: [Float]) {
+        // Access the audio manager from DSP engine
+        // You might need to expose it or create a direct reference
+        dspEngine.audioManager.playSamples(samples)
+    }
+    public func getAudioStats() {
+        dspEngine.audioManager.debugAudioPipeline()
+    }
+    private func setupBindingsAsync() {
+           // Defer binding setup to avoid blocking main thread during init
+           DispatchQueue.main.async { [weak self] in
+               self?.setupBindings()
+           }
+       }
+       
+       private func setupBindings() {
+           // ----> FIX: Add debouncing to prevent excessive updates <----
+           $settings
+                       .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+                       .removeDuplicates() // This now works!
+                       .sink { [weak self] newSettings in
+                           DispatchQueue.global(qos: .userInitiated).async {
+                               self?.updateClientSettings(newSettings)
+                           }
+                       }
+                       .store(in: &cancellables)
+               
+           $selectedSampleRate
+               .removeDuplicates()
+               .sink { [weak self] rate in
+                   DispatchQueue.global(qos: .userInitiated).async {
+                       self?.client.setSampleRate(rate.rawValue)
+                   }
+               }
+               .store(in: &cancellables)
+               
+           $isAutoScaleEnabled
+               .removeDuplicates()
+               .sink { [weak self] enabled in
+                   self?.dspEngine.setAutoScale(isOn: enabled)
+               }
+               .store(in: &cancellables)
+               
+           $tuningOffset
+               .removeDuplicates()
+               .sink { [weak self] offset in
+                   self?.dspEngine.setTuningOffset(Float(offset))
+               }
+               .store(in: &cancellables)
+               
+           $vfoBandwidthHz
+               .removeDuplicates()
+               .sink { [weak self] bandwidth in
+                   self?.dspEngine.setVFO(bandwidthHz: bandwidth)
+               }
+               .store(in: &cancellables)
+               
+           $squelchLevel
+               .removeDuplicates()
+               .sink { [weak self] level in
+                   self?.dspEngine.setSquelch(level: level)
+               }
+               .store(in: &cancellables)
+               
+           // ----> FIX: Throttle DSP parameter updates <----
+           Publishers.CombineLatest3($selectedFFTSize, $averagingCount, $waterfallHeight)
+               .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
+               .sink { [weak self] fft, avg, height in
+                   DispatchQueue.global(qos: .userInitiated).async {
+                       self?.callUpdateParameters(fftSize: fft, averagingCount: avg, waterfallHeight: height)
+                   }
+               }
+               .store(in: &cancellables)
+       }
+       
+       private func updateClientSettings(_ settings: RadioSettings) {
+           client.setFrequency(UInt32(settings.frequencyMHz * 1_000_000))
+           client.setAgcMode(isOn: settings.isAgcOn)
+           client.setBiasTee(isOn: settings.isBiasTeeOn)
+           client.setOffsetTuning(isOn: settings.isOffsetTuningOn)
+           if !settings.isAgcOn {
+               client.setTunerGain(byIndex: settings.tunerGainIndex)
+           }
+       }
     
     // MARK: - Public Methods (formerly in the View)
     

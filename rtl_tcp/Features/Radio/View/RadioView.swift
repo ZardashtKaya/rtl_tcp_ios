@@ -11,6 +11,7 @@ struct RadioView: View {
     
     // The View now has only ONE source of truth: the ViewModel.
     @StateObject private var viewModel = RadioViewModel()
+    @State private var isLoading = true
     
     // Connection settings remain as simple @State for the TextFields.
     @State private var host: String = "zardashtmac.local"
@@ -26,16 +27,19 @@ struct RadioView: View {
     // MARK: - Main Body
     
     var body: some View {
-        NavigationView {
+            NavigationView {
+                if isLoading {
+                    ProgressView("Initializing...")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.black)
+                } else {
                     VStack(spacing: 4) {
                         interactiveDisplayArea
                         controlsTabView
-                        // The old connectionStatusArea is now gone from here.
                     }
                     .padding(.vertical)
-                    .background(Color.black.edgesIgnoringSafeArea(.all)) // Ensure a black background
-                    .navigationBarTitleDisplayMode(.inline) // Keep the title area small
-                    // ----> ADD THE NEW TOOLBAR <----
+                    .background(Color.black.edgesIgnoringSafeArea(.all))
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarTrailing) {
                             Button(action: {
@@ -43,7 +47,6 @@ struct RadioView: View {
                             }) {
                                 ConnectionStatusView(isConnected: viewModel.client.isConnected)
                             }
-                            // The .popover modifier presents our settings view.
                             .popover(isPresented: $showConnectionSettings) {
                                 ConnectionSettingsView(
                                     viewModel: viewModel,
@@ -56,11 +59,16 @@ struct RadioView: View {
                         }
                     }
                 }
-                // This prevents the NavigationView from altering our color scheme on iOS 15+
-                .navigationViewStyle(.stack)
-                .preferredColorScheme(.dark)
-            
-    }
+            }
+            .navigationViewStyle(.stack)
+            .preferredColorScheme(.dark)
+            .onAppear {
+                // ----> FIX: Delay to allow initialization <----
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    isLoading = false
+                }
+            }
+        }
     
     // MARK: - Subviews
     
@@ -98,14 +106,15 @@ struct RadioView: View {
     
     private var controlsTabView: some View {
         TabView {
-            TuningControlsView(
-                squelchLevel: $viewModel.squelchLevel,
-                frequencyMHz: $viewModel.settings.frequencyMHz,
-                frequencyStep: $viewModel.frequencyStep,
-                isFrequencyFieldFocused: $isFrequencyFieldFocused,
-                vfoBandwidthHz: $viewModel.vfoBandwidthHz
-            )
-            .tabItem { Image(systemName: "tuningfork"); Text("Tuning") }
+                TuningControlsView(
+                    squelchLevel: $viewModel.squelchLevel,
+                    frequencyMHz: $viewModel.settings.frequencyMHz,
+                    frequencyStep: $viewModel.frequencyStep,
+                    isFrequencyFieldFocused: $isFrequencyFieldFocused,
+                    vfoBandwidthHz: $viewModel.vfoBandwidthHz,
+                    viewModel: viewModel  // Add this line
+                )
+                .tabItem { Image(systemName: "tuningfork"); Text("Tuning") }
             
             DSPControlsView(
                 isAutoScaleEnabled: $viewModel.isAutoScaleEnabled,

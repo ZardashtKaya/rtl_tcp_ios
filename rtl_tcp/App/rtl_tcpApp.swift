@@ -9,9 +9,16 @@ import SwiftUI
 
 @main
 struct rtl_tcpApp: App {
+    init() {
+        print("🚀 App init started: \(Date())")
+    }
+    
     var body: some Scene {
         WindowGroup {
             RadioView()
+                .onAppear {
+                    print("🎯 RadioView appeared: \(Date())")
+                }
         }
     }
 }
