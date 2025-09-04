@@ -1,5 +1,5 @@
 //
-//  SpectrogramView.swift
+//  UI Components/SpectrogramView.swift
 //  rtl_tcp
 //
 //  Created by Zardasht Kaya on 9/4/25.

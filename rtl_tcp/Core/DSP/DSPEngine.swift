@@ -1,3 +1,10 @@
+//
+//  Core/DSP/DSPEngine.swift
+//  rtl_tcp
+//
+//  Created by Zardasht Kaya on 9/4/25.
+//
+
 import Combine
 import Foundation
 import Accelerate

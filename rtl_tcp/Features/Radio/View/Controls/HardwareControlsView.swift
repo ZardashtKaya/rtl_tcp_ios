@@ -1,5 +1,5 @@
 //
-//  HardwareControlsView.swift
+//  Features/Radio/View/Controls/HardwareControlsView.swift
 //  rtl_tcp
 //
 //  Created by Zardasht Kaya on 9/4/25.

@@ -1,5 +1,5 @@
 //
-//  Demodulator.swift
+//  Core/DSP/Demodulator.swift
 //  rtl_tcp
 //
 //  Created by Zardasht Kaya on 9/4/25.

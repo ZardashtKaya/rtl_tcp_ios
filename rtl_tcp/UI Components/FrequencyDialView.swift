@@ -1,3 +1,11 @@
+//
+//  UI Components/FrequencyDialView.swift
+//  rtl_tcp
+//
+//  Created by Zardasht Kaya on 9/4/25.
+//
+
+
 import SwiftUI
 
 // FrequencyStep enum remains the same...
