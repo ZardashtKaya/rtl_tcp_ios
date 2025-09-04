@@ -7,47 +7,60 @@
 
 import Foundation
 
-/// A thread-safe circular buffer for audio samples using standard Swift concurrency.
 class CircularBuffer {
     private var buffer: [Float]
     private var writeIndex = 0
     private var readIndex = 0
     private let bufferSize: Int
-    private let bufferMask: Int // For fast modulo using bitwise AND
+    private let bufferMask: Int
     private let lock = NSLock()
+    
+    // ----> ADD: Overflow protection <----
+    private var overflowCount = 0
+    private let maxOverflows = 100
 
-    /// The number of samples currently available to be read.
     var availableForReading: Int {
         lock.lock()
         defer { lock.unlock() }
         return (writeIndex - readIndex + bufferSize) & bufferMask
     }
 
-    /// Initializes a new circular buffer with power-of-2 size for optimal performance.
-    /// - Parameter size: The total capacity of the buffer in samples (will be rounded up to next power of 2).
     init(size: Int) {
-        // Round up to next power of 2 for efficient modulo operations
         let powerOf2Size = 1 << Int(ceil(log2(Double(size))))
         self.bufferSize = powerOf2Size
         self.bufferMask = powerOf2Size - 1
         self.buffer = [Float](repeating: 0.0, count: powerOf2Size)
     }
 
-    /// Thread-safe write operation.
     @discardableResult
     func write(_ samples: [Float]) -> Int {
         lock.lock()
         defer { lock.unlock() }
         
-        for sample in samples {
-            buffer[writeIndex & bufferMask] = sample
+        // ----> FIX: Prevent buffer overflow <----
+        let available = bufferSize - ((writeIndex - readIndex + bufferSize) & bufferMask)
+        if samples.count > available {
+            overflowCount += 1
+            if overflowCount % 50 == 0 {
+                print("⚠️ Audio buffer overflow #\(overflowCount), dropping \(samples.count - available) samples")
+            }
+            
+            // Skip samples if we're overflowing too much
+            if overflowCount > maxOverflows {
+                readIndex = (readIndex + samples.count) & bufferMask
+                overflowCount = 0
+            }
+        }
+        
+        let samplesToWrite = min(samples.count, available)
+        for i in 0..<samplesToWrite {
+            buffer[writeIndex & bufferMask] = samples[i]
             writeIndex = (writeIndex + 1) & bufferMask
         }
         
-        return samples.count
+        return samplesToWrite
     }
 
-    /// Thread-safe read operation.
     func read(count: Int) -> [Float] {
         lock.lock()
         defer { lock.unlock() }
@@ -55,6 +68,7 @@ class CircularBuffer {
         let available = (writeIndex - readIndex + bufferSize) & bufferMask
         let readableCount = min(count, available)
         
+        // ----> FIX: Pre-allocate output array <----
         var output = [Float]()
         output.reserveCapacity(readableCount)
         
@@ -64,5 +78,14 @@ class CircularBuffer {
         }
         
         return output
+    }
+    
+    // ----> ADD: Cleanup method <----
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        writeIndex = 0
+        readIndex = 0
+        overflowCount = 0
     }
 }
