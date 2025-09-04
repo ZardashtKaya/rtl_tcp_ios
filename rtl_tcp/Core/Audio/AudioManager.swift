@@ -1,57 +1,66 @@
-//
-//  AudioManager.swift
-//  rtl_tcp
-//
-//  Created by Zardasht Kaya on 9/4/25.
-//
-
 import Foundation
 import AVFoundation
 
 class AudioManager {
-    // The target sample rate for the device's audio hardware.
     public static let audioSampleRate: Double = 48000.0
 
     private let audioEngine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
-    // The format of the raw audio samples we will be generating.
+    private var sourceNode: AVAudioSourceNode!
+    
+    // A circular buffer to safely pass audio from the DSP thread to the audio thread.
+    // Size is 2 seconds of audio data to prevent buffer underruns.
+    private let audioBuffer = CircularBuffer(size: Int(audioSampleRate * 2))
+
     private let audioFormat: AVAudioFormat
 
     init() {
-        // Standard PCM audio format: 48kHz sample rate, 32-bit floating point, single channel (mono).
         self.audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: AudioManager.audioSampleRate,
                                          channels: 1,
                                          interleaved: false)!
         
-        // Attach the player node to the audio engine.
-        audioEngine.attach(playerNode)
+        // Create the source node. Its render block will be called by the audio engine
+        // whenever it needs more audio samples.
+        self.sourceNode = AVAudioSourceNode(format: self.audioFormat) { [unowned self] _, _, frameCount, audioBufferList -> OSStatus in
+            
+            // Get a pointer to the output buffer
+            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            
+            // Read the requested number of samples from our circular buffer
+            let samples = self.audioBuffer.read(count: Int(frameCount))
+            
+            // Copy the samples into the output buffer
+            for frame in 0..<Int(frameCount) {
+                if frame < samples.count {
+                    let value = samples[frame]
+                    for buffer in ablPointer {
+                        let buf = buffer.mData!.assumingMemoryBound(to: Float.self)
+                        buf[frame] = value
+                    }
+                } else {
+                    // If we run out of samples (buffer underrun), fill the rest with silence.
+                    for buffer in ablPointer {
+                        let buf = buffer.mData!.assumingMemoryBound(to: Float.self)
+                        buf[frame] = 0.0
+                    }
+                }
+            }
+            return noErr
+        }
         
-        // Connect the player node to the engine's main output mixer.
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioFormat)
+        audioEngine.attach(sourceNode)
+        audioEngine.connect(sourceNode, to: audioEngine.mainMixerNode, format: audioFormat)
         
-        // Prepare and start the engine.
         do {
             try audioEngine.start()
-            playerNode.play()
         } catch {
             print("Error starting audio engine: \(error.localizedDescription)")
         }
     }
 
-    // This is the main entry point for the DSPEngine to send us audio data.
+    /// Receives audio samples from the DSPEngine and writes them to the circular buffer.
     public func playSamples(_ samples: [Float]) {
         guard !samples.isEmpty else { return }
-
-        // Create an AVAudioPCMBuffer to hold our samples.
-        let buffer = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: AVAudioFrameCount(samples.count))!
-        buffer.frameLength = buffer.frameCapacity
-        
-        // Get a pointer to the buffer's memory and copy our samples into it.
-        let channelData = buffer.floatChannelData![0]
-        memcpy(channelData, samples, samples.count * MemoryLayout<Float>.size)
-        
-        // Schedule the buffer for playback.
-        playerNode.scheduleBuffer(buffer)
+        audioBuffer.write(samples)
     }
 }
