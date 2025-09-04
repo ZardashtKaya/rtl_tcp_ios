@@ -46,6 +46,6 @@ struct ConnectionSettingsView: View {
             }
         }
         .padding()
-        .frame(width: 300) // Give the popover a reasonable size
+        .frame(width: 300, height: 250) // Adjusted height for a more compact view
     }
 }

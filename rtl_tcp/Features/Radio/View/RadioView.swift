@@ -45,6 +45,7 @@ struct RadioView: View {
                                     port: $port,
                                     isPresented: $showConnectionSettings
                                 )
+                                .presentationCompactAdaptation(.popover)
                             }
                         }
                     }
