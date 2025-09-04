@@ -16,33 +16,49 @@ struct TuningControlsView: View {
     var viewModel: RadioViewModel?
     
     private func generateTestTone(frequency: Double, duration: Double, sampleRate: Double) -> [Float] {
-            let sampleCount = Int(duration * sampleRate)
-            var samples = [Float](repeating: 0.0, count: sampleCount)
-            
-            for i in 0..<sampleCount {
-                let time = Double(i) / sampleRate
-                samples[i] = Float(0.3 * sin(2.0 * .pi * frequency * time))
-            }
-            
-            return samples
+        let sampleCount = Int(duration * sampleRate)
+        var samples = [Float](repeating: 0.0, count: sampleCount)
+        
+        for i in 0..<sampleCount {
+            let time = Double(i) / sampleRate
+            samples[i] = Float(0.3 * sin(2.0 * .pi * frequency * time))
         }
+        
+        return samples
+    }
     
     private func playTestTone() {
-            let testTone = generateTestTone(frequency: 440.0, duration: 1.0, sampleRate: 48000.0)
-            
-            // For now, just print - we'll need to access the audio manager through the view model
-            print("🔊 Generated test tone with \(testTone.count) samples")
-            
-            // If viewModel is available, play the test tone
-            viewModel?.playTestAudio(testTone)
-        }
-   
+        let testTone = generateTestTone(frequency: 440.0, duration: 1.0, sampleRate: 48000.0)
+        print("🔊 Generated test tone with \(testTone.count) samples")
+        viewModel?.playTestAudio(testTone)
+    }
     
+    // ----> ADD: Test spectrum update <----
+    private func testSpectrumUpdate() {
+        guard let viewModel = viewModel else { return }
+        
+        // Generate fake spectrum data
+        let fftSize = 4096
+        var fakeSpectrum = [Float](repeating: 0.0, count: fftSize)
+        
+        for i in 0..<fftSize {
+            let freq = Float(i) / Float(fftSize)
+            fakeSpectrum[i] = -80.0 + 40.0 * sin(freq * 20.0 * .pi) + Float.random(in: -10...10)
+        }
+        
+        // Force update the spectrum
+        DispatchQueue.main.async {
+            viewModel.dspEngine.spectrum = fakeSpectrum
+            print("📊 Injected fake spectrum data")
+        }
+    }
+   
     var body: some View {
         Form {
             Section(header: Text("Center Frequency: \(String(format: "%.4f", frequencyMHz)) MHz")) {
                 FrequencyDialView(frequencyMHz: $frequencyMHz, step: $frequencyStep)
             }
+            
             Section(header: Text("Audio Debug")) {
                 Button("Test Audio") {
                     playTestTone()
@@ -50,6 +66,11 @@ struct TuningControlsView: View {
                 
                 Button("Test Demodulation") {
                     viewModel?.testDemodulation()
+                }
+                
+                // ----> ADD: Test spectrum button <----
+                Button("Test Spectrum Update") {
+                    testSpectrumUpdate()
                 }
                 
                 Button("Disable Squelch") {
@@ -60,41 +81,35 @@ struct TuningControlsView: View {
                     Button("Audio Stats") {
                         viewModel.getAudioStats()
                     }
+                    
+                    // ----> ADD: DSP Stats <----
+                    Button("DSP Stats") {
+                        print("📊 Spectrum count: \(viewModel.dspEngine.spectrum.count)")
+                        print("📊 Waterfall count: \(viewModel.dspEngine.waterfallData.count)")
+                        print("📊 Dynamic range: \(viewModel.dspEngine.dynamicMinDb) to \(viewModel.dspEngine.dynamicMaxDb)")
+                    }
                 }
             }
             
             Section(header: Text("VFO")) {
-                            // ----> ADD BANDWIDTH DISPLAY <----
-                            HStack {
-                                Text("Bandwidth")
-                                Spacer()
-                                // Format the value in KHz for readability
-                                Text("\(String(format: "%.1f", vfoBandwidthHz / 1000)) KHz")
-                                    .foregroundColor(.gray)
-                            }
-                            
-                            HStack {
-                                Image(systemName: "speaker.slash.fill")
-                                Slider(value: $squelchLevel, in: 0.0...1.0)
-                            }
-                        }
-                    }
+                HStack {
+                    Text("Bandwidth")
+                    Spacer()
+                    Text("\(String(format: "%.1f", vfoBandwidthHz / 1000)) KHz")
+                        .foregroundColor(.gray)
+                }
+                
+                HStack {
+                    Image(systemName: "speaker.slash.fill")
+                    Slider(value: $squelchLevel, in: 0.0...1.0)
+                }
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .keyboard) {
                 Spacer()
                 Button("Done") { isFrequencyFieldFocused = false }
             }
         }
-    }
-    
-    
-    private func generateAndPlayTestTone() {
-        let testTone = generateTestTone(frequency: 440.0, duration: 1.0, sampleRate: 48000.0)
-        
-        // Access audio manager through view model
-        // You'll need to expose the audio manager in your view model:
-        // viewModel.playTestAudio(testTone)
-        
-        print("🔊 Generated test tone with \(testTone.count) samples")
     }
 }

@@ -29,13 +29,15 @@ class RadioViewModel: ObservableObject {
     @Published var frequencyStep: FrequencyStep = .khz100
     
     private var cancellables = Set<AnyCancellable>()
-    
-    // ----> ADD: Cleanup timer <----
     private var cleanupTimer: Timer?
+    
+    // ----> ADD: Connection state tracking <----
+    @Published var isConnected: Bool = false
 
     init() {
         setupBindingsAsync()
         startCleanupTimer()
+        setupConnectionObserver()
     }
     
     deinit {
@@ -43,7 +45,54 @@ class RadioViewModel: ObservableObject {
         cancellables.removeAll()
     }
     
-    // ----> ADD: Periodic cleanup <----
+    // ----> ADD: Connection state observer <----
+    private func setupConnectionObserver() {
+        client.$isConnected
+            .removeDuplicates()
+            .sink { [weak self] connected in
+                self?.isConnected = connected
+                if connected {
+                    self?.handleConnectionEstablished()
+                } else {
+                    self?.handleConnectionLost()
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    // ----> ADD: Connection established handler <----
+    private func handleConnectionEstablished() {
+        print("🔗 Connection established - initializing audio system...")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            // Reset DSP engine and audio system
+            self.dspEngine.resetForConnection()
+            
+            // Reset demodulator if it has a reset method
+            if let nfmDemod = self.dspEngine.demodulator as? NFMDemodulator {
+                nfmDemod.resetForConnection()
+            }
+            
+            print("🔗 Audio system initialized for connection")
+        }
+    }
+    
+    // ----> ADD: Connection lost handler <----
+    private func handleConnectionLost() {
+        print("🔗 Connection lost - stopping audio system...")
+        
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            // Stop DSP engine and audio system
+            self.dspEngine.stopForDisconnection()
+            
+            print("🔗 Audio system stopped for disconnection")
+        }
+    }
+    
     private func startCleanupTimer() {
         cleanupTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             self?.performCleanup()
@@ -51,11 +100,9 @@ class RadioViewModel: ObservableObject {
     }
     
     private func performCleanup() {
-        // Reset audio buffer if it's getting too full
         let stats = dspEngine.audioManager.getAudioStats()
-        if stats.buffered > 96000 { // 2 seconds at 48kHz
+        if stats.buffered > 96000 {
             print("🧹 Resetting audio buffer due to excessive buffering")
-            // You might need to add a reset method to AudioManager
         }
         
         print("🧹 Cleanup: Audio buffered=\(stats.buffered), underruns=\(stats.underruns)")
@@ -80,7 +127,6 @@ class RadioViewModel: ObservableObject {
     }
     
     private func setupBindings() {
-        // ----> FIX: Add more aggressive debouncing <----
         $settings
             .debounce(for: .milliseconds(200), scheduler: RunLoop.main)
             .removeDuplicates()
@@ -153,14 +199,19 @@ class RadioViewModel: ObservableObject {
     }
     
     func setupAndConnect(host: String, port: String) {
+        // ----> FIX: Set up data handler before connecting <----
         client.onDataReceived = { [weak self] data in
             self?.dspEngine.process(data: data)
         }
+        
         guard let portNumber = UInt16(port) else { return }
         client.connect(host: host, port: portNumber)
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        // ----> FIX: Wait for connection and initialization <----
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self = self, self.client.isConnected else { return }
+            
+            print("🔗 Sending initial configuration...")
             
             self.client.setSampleRate(self.selectedSampleRate.rawValue)
             self.client.setFrequency(UInt32(self.settings.frequencyMHz * 1_000_000))
@@ -172,6 +223,8 @@ class RadioViewModel: ObservableObject {
             self.client.setOffsetTuning(isOn: self.settings.isOffsetTuningOn)
             self.dspEngine.setVFO(bandwidthHz: self.vfoBandwidthHz)
             self.dspEngine.setSquelch(level: self.squelchLevel)
+            
+            print("🔗 Initial configuration sent")
         }
     }
     

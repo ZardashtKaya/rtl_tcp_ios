@@ -10,7 +10,6 @@ import Accelerate
 
 class NFMDemodulator: Demodulator {
     
-    // MARK: - Properties
     private var squelchLevel: Float = 0.001
     private var lastI: Float = 0.0
     private var lastQ: Float = 0.0
@@ -19,7 +18,7 @@ class NFMDemodulator: Demodulator {
     private var resamplerInputBuffer: [Float] = []
     private var resamplerRatio: Double = 1.0
     
-    // ----> FIX: Pre-allocate and reuse buffers <----
+    // ----> FIX: Initialize buffers properly <----
     private var filteredBuffer: [Float] = []
     private var decimatedBuffer: [Float] = []
     private var demodulatedBuffer: [Float] = []
@@ -28,14 +27,18 @@ class NFMDemodulator: Demodulator {
     private var realOutput: [Float] = []
     private var imagOutput: [Float] = []
     
-    // ----> ADD: Buffer size limits <----
     private let maxBufferSize = 32768
     private let maxResamplerBuffer = 8192
     
     private var processedChunks: Int = 0
     private var squelchedChunks: Int = 0
+    
+    // ----> ADD: Initialization flag <----
+    private var isInitialized = false
 
     func update(bandwidthHz: Double, sampleRateHz: Double, squelchLevel: Float) {
+        print("🎛️ NFM Demodulator updating...")
+        
         self.squelchLevel = powf(squelchLevel, 2) * 0.01
         
         let audioBandwidth = 8000.0
@@ -46,32 +49,36 @@ class NFMDemodulator: Demodulator {
         let intermediateSampleRate = sampleRateHz / Double(decimationFactor)
         self.resamplerRatio = AudioManager.audioSampleRate / intermediateSampleRate
         
-        // ----> FIX: Limit resampler buffer size <----
+        // ----> FIX: Limit and reset resampler buffer safely <----
         if resamplerInputBuffer.count > maxResamplerBuffer {
-            resamplerInputBuffer = Array(resamplerInputBuffer.suffix(maxResamplerBuffer / 2))
+            resamplerInputBuffer = []
         }
         
-        // Pre-allocate buffers with reasonable sizes
-        filteredBuffer = [Float](repeating: 0.0, count: maxBufferSize)
-        decimatedBuffer = [Float](repeating: 0.0, count: maxBufferSize)
-        demodulatedBuffer = [Float](repeating: 0.0, count: maxBufferSize / 2)
-        realInput = [Float](repeating: 0.0, count: maxBufferSize / 2)
-        imagInput = [Float](repeating: 0.0, count: maxBufferSize / 2)
-        realOutput = [Float](repeating: 0.0, count: maxBufferSize / 2)
-        imagOutput = [Float](repeating: 0.0, count: maxBufferSize / 2)
+        // ----> FIX: Initialize buffers with proper sizes <----
+        let bufferSize = min(maxBufferSize, Int(sampleRateHz / 10)) // 100ms worth of samples max
+        filteredBuffer = [Float](repeating: 0.0, count: bufferSize)
+        decimatedBuffer = [Float](repeating: 0.0, count: bufferSize)
+        demodulatedBuffer = [Float](repeating: 0.0, count: bufferSize / 2)
+        realInput = [Float](repeating: 0.0, count: bufferSize / 2)
+        imagInput = [Float](repeating: 0.0, count: bufferSize / 2)
+        realOutput = [Float](repeating: 0.0, count: bufferSize / 2)
+        imagOutput = [Float](repeating: 0.0, count: bufferSize / 2)
+        
+        self.isInitialized = true
         
         print("🎛️ NFM Demodulator updated: SR=\(sampleRateHz), BW=\(bandwidthHz), Decimation=\(decimationFactor)")
     }
 
     func demodulate(frequencyBand iqSamples: [Float]) -> [Float] {
-        guard !firFilter.isEmpty, !iqSamples.isEmpty, iqSamples.count % 2 == 0 else {
+        guard !firFilter.isEmpty, !iqSamples.isEmpty, iqSamples.count % 2 == 0, isInitialized else {
             return []
         }
 
         processedChunks += 1
         
-        // ----> FIX: Limit input size to prevent memory issues <----
-        let inputSamples = iqSamples.count > maxBufferSize ? Array(iqSamples.prefix(maxBufferSize)) : iqSamples
+        // ----> FIX: Limit input size more aggressively <----
+        let maxInputSize = min(maxBufferSize, iqSamples.count)
+        let inputSamples = iqSamples.count > maxInputSize ? Array(iqSamples.prefix(maxInputSize)) : iqSamples
         
         let filteredIQ = applyFIROptimized(input: inputSamples)
         
@@ -108,8 +115,9 @@ class NFMDemodulator: Demodulator {
             return []
         }
         
-        // ----> FIX: Reuse buffer instead of growing <----
         let requiredSize = outputSampleCount * 2
+        
+        // ----> FIX: Ensure buffer is large enough <----
         if decimatedBuffer.count < requiredSize {
             decimatedBuffer = [Float](repeating: 0.0, count: requiredSize)
         }
@@ -126,12 +134,14 @@ class NFMDemodulator: Demodulator {
     }
     
     private func demodulateNFMOptimized(_ decimatedIQ: [Float], sampleCount: Int) -> [Float] {
-        // ----> FIX: Reuse buffer <----
+        // ----> FIX: Ensure buffer is large enough <----
         if demodulatedBuffer.count < sampleCount {
             demodulatedBuffer = [Float](repeating: 0.0, count: sampleCount)
         }
         
         for i in 0..<sampleCount {
+            guard i * 2 + 1 < decimatedIQ.count else { break }
+            
             let I = decimatedIQ[i * 2]
             let Q = decimatedIQ[i * 2 + 1]
             
@@ -141,6 +151,7 @@ class NFMDemodulator: Demodulator {
                 let phaseDiff = currentPhase - atan2f(lastQ, lastI)
                 demodulatedBuffer[i] = phaseDiff * 0.159155
             } else {
+                guard (i-1) * 2 + 1 < decimatedIQ.count else { break }
                 let prevPhase = atan2f(decimatedIQ[(i-1) * 2 + 1], decimatedIQ[(i-1) * 2])
                 var phaseDiff = currentPhase - prevPhase
                 
@@ -183,7 +194,6 @@ class NFMDemodulator: Demodulator {
     private func applyFIROptimized(input: [Float]) -> [Float] {
         let inputCount = input.count / 2
         
-        // ----> FIX: Reuse buffers <----
         let requiredSize = input.count
         if filteredBuffer.count < requiredSize {
             filteredBuffer = [Float](repeating: 0.0, count: requiredSize)
@@ -196,20 +206,26 @@ class NFMDemodulator: Demodulator {
             imagOutput = [Float](repeating: 0.0, count: inputCount)
         }
         
-        // Deinterleave
+        // Deinterleave with bounds checking
         for i in 0..<inputCount {
-            realInput[i] = input[i * 2]
-            imagInput[i] = input[i * 2 + 1]
+            if i * 2 + 1 < input.count {
+                realInput[i] = input[i * 2]
+                imagInput[i] = input[i * 2 + 1]
+            }
         }
         
-        // Apply convolution
-        vDSP_conv(realInput, 1, firFilter.reversed(), 1, &realOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
-        vDSP_conv(imagInput, 1, firFilter.reversed(), 1, &imagOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
+        // Apply convolution with bounds checking
+        if inputCount > 0 && !firFilter.isEmpty {
+            vDSP_conv(realInput, 1, firFilter.reversed(), 1, &realOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
+            vDSP_conv(imagInput, 1, firFilter.reversed(), 1, &imagOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
+        }
         
-        // Interleave output
+        // Interleave output with bounds checking
         for i in 0..<inputCount {
-            filteredBuffer[i * 2] = realOutput[i]
-            filteredBuffer[i * 2 + 1] = imagOutput[i]
+            if i * 2 + 1 < filteredBuffer.count {
+                filteredBuffer[i * 2] = realOutput[i]
+                filteredBuffer[i * 2 + 1] = imagOutput[i]
+            }
         }
         
         return Array(filteredBuffer.prefix(requiredSize))
@@ -218,20 +234,27 @@ class NFMDemodulator: Demodulator {
     private func resampleOptimized(input: [Float]) -> [Float] {
         guard !input.isEmpty else { return [] }
         
-        // ----> FIX: Limit resampler buffer growth <----
-        if resamplerInputBuffer.count > maxResamplerBuffer {
-            let keepSize = maxResamplerBuffer / 2
+        // ----> FIX: Limit resampler buffer more aggressively <----
+        let maxResamplerSize = 4096 // Reduce buffer size
+        if resamplerInputBuffer.count > maxResamplerSize {
+            let keepSize = maxResamplerSize / 8 // Keep much less
             resamplerInputBuffer = Array(resamplerInputBuffer.suffix(keepSize))
         }
         
         resamplerInputBuffer.append(contentsOf: input)
         var output = [Float]()
-        output.reserveCapacity(Int(Double(input.count) * resamplerRatio) + 100)
+        
+        // ----> FIX: Limit output size <----
+        let maxOutputSize = Int(Double(input.count) * resamplerRatio) + 100
+        output.reserveCapacity(min(maxOutputSize, 2048)) // Cap at 2048 samples
         
         var outputSamplePosition = 0.0
         let inputCount = Double(resamplerInputBuffer.count)
         
-        while outputSamplePosition < inputCount - 1 && outputSamplePosition >= 0 {
+        while outputSamplePosition < inputCount - 1 &&
+              outputSamplePosition >= 0 &&
+              output.count < 2048 { // ----> FIX: Hard limit
+            
             let index = Int(floor(outputSamplePosition))
             
             guard index >= 0 && index + 1 < resamplerInputBuffer.count else {
@@ -257,5 +280,21 @@ class NFMDemodulator: Demodulator {
         }
         
         return output
+    }
+    
+    
+    func resetForConnection() {
+        print("🎛️ Resetting NFM demodulator for new connection...")
+        
+        // Reset state
+        lastI = 0.0
+        lastQ = 0.0
+        processedChunks = 0
+        squelchedChunks = 0
+        
+        // Clear resampler buffer
+        resamplerInputBuffer.removeAll(keepingCapacity: true)
+        
+        print("🎛️ NFM demodulator reset complete")
     }
 }

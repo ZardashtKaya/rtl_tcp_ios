@@ -15,7 +15,6 @@ class CircularBuffer {
     private let bufferMask: Int
     private let lock = NSLock()
     
-    // ----> ADD: Overflow protection <----
     private var overflowCount = 0
     private let maxOverflows = 100
 
@@ -37,28 +36,27 @@ class CircularBuffer {
         lock.lock()
         defer { lock.unlock() }
         
-        // ----> FIX: Prevent buffer overflow <----
         let available = bufferSize - ((writeIndex - readIndex + bufferSize) & bufferMask)
+        
+        // ----> FIX: More aggressive overflow handling <----
         if samples.count > available {
-            overflowCount += 1
-            if overflowCount % 50 == 0 {
-                print("⚠️ Audio buffer overflow #\(overflowCount), dropping \(samples.count - available) samples")
-            }
+            // Drop old data to make room for new data
+            let samplesToDrop = samples.count - available
+            readIndex = (readIndex + samplesToDrop) & bufferMask
             
-            // Skip samples if we're overflowing too much
-            if overflowCount > maxOverflows {
-                readIndex = (readIndex + samples.count) & bufferMask
-                overflowCount = 0
+            overflowCount += 1
+            if overflowCount % 100 == 0 {
+                print("⚠️ Audio buffer overflow #\(overflowCount), dropped \(samplesToDrop) old samples")
             }
         }
         
-        let samplesToWrite = min(samples.count, available)
-        for i in 0..<samplesToWrite {
+        // Write all new samples
+        for i in 0..<samples.count {
             buffer[writeIndex & bufferMask] = samples[i]
             writeIndex = (writeIndex + 1) & bufferMask
         }
         
-        return samplesToWrite
+        return samples.count
     }
 
     func read(count: Int) -> [Float] {
@@ -68,7 +66,6 @@ class CircularBuffer {
         let available = (writeIndex - readIndex + bufferSize) & bufferMask
         let readableCount = min(count, available)
         
-        // ----> FIX: Pre-allocate output array <----
         var output = [Float]()
         output.reserveCapacity(readableCount)
         
@@ -80,12 +77,20 @@ class CircularBuffer {
         return output
     }
     
-    // ----> ADD: Cleanup method <----
+    // ----> ADD: Reset method <----
     func reset() {
         lock.lock()
         defer { lock.unlock() }
+        
         writeIndex = 0
         readIndex = 0
         overflowCount = 0
+        
+        // Clear the buffer
+        for i in 0..<bufferSize {
+            buffer[i] = 0.0
+        }
+        
+        print("🔄 Circular buffer reset")
     }
 }

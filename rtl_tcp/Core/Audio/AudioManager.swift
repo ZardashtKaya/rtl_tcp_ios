@@ -18,19 +18,56 @@ class AudioManager {
     private let audioBuffer = CircularBuffer(size: Int(audioSampleRate * 2))
     private let audioFormat: AVAudioFormat
     
-    // ----> ADD: Debug counters <----
     private var samplesReceived: Int = 0
     private var samplesPlayed: Int = 0
     private var bufferUnderruns: Int = 0
 
     init() {
-        // Change to stereo to match the main mixer
         self.audioFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: AudioManager.audioSampleRate,
-                                         channels: 2,  // Changed from 1 to 2
+                                         channels: 2,
                                          interleaved: false)!
         
         setupAudioEngine()
+    }
+    
+    // ----> ADD: Reset method for connection initialization <----
+    public func resetForConnection() {
+        print("🔊 Resetting audio system for new connection...")
+        
+        // Reset counters
+        samplesReceived = 0
+        samplesPlayed = 0
+        bufferUnderruns = 0
+        
+        // Reset the circular buffer
+        audioBuffer.reset()
+        
+        // Restart audio engine if needed
+        if !audioEngine.isRunning {
+            do {
+                try audioEngine.start()
+                print("🔊 Audio engine restarted")
+            } catch {
+                print("❌ Failed to restart audio engine: \(error)")
+            }
+        }
+        
+        print("🔊 Audio system reset complete")
+    }
+    
+    // ----> ADD: Stop method for disconnection <----
+    public func stopForDisconnection() {
+        print("🔊 Stopping audio system for disconnection...")
+        
+        // Clear the buffer
+        audioBuffer.reset()
+        
+        // Stop the audio engine
+        if audioEngine.isRunning {
+            audioEngine.stop()
+            print("🔊 Audio engine stopped")
+        }
     }
     
     private func setupAudioEngine() {
@@ -41,7 +78,6 @@ class AudioManager {
             print("🔊 Audio session configured successfully")
         } catch {
             print("❌ Audio session setup failed: \(error)")
-            // Try fallback configuration
             do {
                 try AVAudioSession.sharedInstance().setCategory(.playback)
                 try AVAudioSession.sharedInstance().setActive(true)
@@ -51,7 +87,6 @@ class AudioManager {
             }
         }
         
-        // Create the source node
         self.sourceNode = AVAudioSourceNode(format: self.audioFormat) { [unowned self] _, _, frameCount, audioBufferList -> OSStatus in
             
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
@@ -66,11 +101,9 @@ class AudioManager {
             
             self.samplesPlayed += samples.count
             
-            // Fill both channels with the same mono data
             for frame in 0..<Int(frameCount) {
                 let value: Float = frame < samples.count ? max(-1.0, min(1.0, samples[frame])) : 0.0
                 
-                // Write to both left and right channels
                 for buffer in ablPointer {
                     let buf = buffer.mData!.assumingMemoryBound(to: Float.self)
                     buf[frame] = value
@@ -82,7 +115,6 @@ class AudioManager {
         audioEngine.attach(sourceNode)
         audioEngine.connect(sourceNode, to: audioEngine.mainMixerNode, format: audioFormat)
         
-        // ----> ADD: More detailed error handling <----
         do {
             try audioEngine.start()
             print("🔊 Audio engine started successfully")
@@ -94,18 +126,15 @@ class AudioManager {
         }
     }
 
-    /// Receives audio samples from the DSPEngine and writes them to the circular buffer.
     public func playSamples(_ samples: [Float]) {
         guard !samples.isEmpty else { return }
         
         samplesReceived += samples.count
         
-        // ----> ADD: Debug logging every 10 seconds worth of samples <----
         if samplesReceived % Int(AudioManager.audioSampleRate * 10) == 0 {
             print("🔊 Audio stats: received \(samplesReceived), played \(samplesPlayed), buffer: \(audioBuffer.availableForReading), underruns: \(bufferUnderruns)")
         }
         
-        // ----> ADD: Check for NaN or infinite values <----
         let hasInvalidSamples = samples.contains { !$0.isFinite }
         if hasInvalidSamples {
             print("⚠️ Invalid audio samples detected (NaN/Inf)")
@@ -116,10 +145,10 @@ class AudioManager {
         }
     }
     
-    // ----> ADD: Debug method <----
     public func getAudioStats() -> (received: Int, played: Int, buffered: Int, underruns: Int) {
         return (samplesReceived, samplesPlayed, audioBuffer.availableForReading, bufferUnderruns)
     }
+    
     public func debugAudioPipeline() {
         let stats = getAudioStats()
         let bufferLevel = Double(stats.buffered) / AudioManager.audioSampleRate

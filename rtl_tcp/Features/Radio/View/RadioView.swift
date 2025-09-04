@@ -4,73 +4,63 @@
 //
 //  Created by Zardasht Kaya on 9/4/25.
 //
+
 import SwiftUI
 
 struct RadioView: View {
-    // MARK: - State Properties
-    
-    // The View now has only ONE source of truth: the ViewModel.
     @StateObject private var viewModel = RadioViewModel()
     @State private var isLoading = true
     
-    // Connection settings remain as simple @State for the TextFields.
     @State private var host: String = "zardashtmac.local"
     @State private var port: String = "1234"
     
-    // Gesture-specific state MUST remain in the View.
     @GestureState private var dragAmount: CGFloat = 0
     @GestureState private var magnificationAmount: CGFloat = 1.0
     @FocusState private var isFrequencyFieldFocused: Bool
     @State private var showConnectionSettings = false
 
-
-    // MARK: - Main Body
-    
     var body: some View {
-            NavigationView {
-                if isLoading {
-                    ProgressView("Initializing...")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color.black)
-                } else {
-                    VStack(spacing: 4) {
-                        interactiveDisplayArea
-                        controlsTabView
-                    }
-                    .padding(.vertical)
-                    .background(Color.black.edgesIgnoringSafeArea(.all))
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Button(action: {
-                                showConnectionSettings = true
-                            }) {
-                                ConnectionStatusView(isConnected: viewModel.client.isConnected)
-                            }
-                            .popover(isPresented: $showConnectionSettings) {
-                                ConnectionSettingsView(
-                                    viewModel: viewModel,
-                                    host: $host,
-                                    port: $port,
-                                    isPresented: $showConnectionSettings
-                                )
-                                .presentationCompactAdaptation(.popover)
-                            }
+        NavigationView {
+            if isLoading {
+                ProgressView("Initializing...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+            } else {
+                VStack(spacing: 4) {
+                    interactiveDisplayArea
+                    controlsTabView
+                }
+                .padding(.vertical)
+                .background(Color.black.edgesIgnoringSafeArea(.all))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: {
+                            showConnectionSettings = true
+                        }) {
+                            ConnectionStatusView(isConnected: viewModel.client.isConnected)
+                        }
+                        .popover(isPresented: $showConnectionSettings) {
+                            ConnectionSettingsView(
+                                viewModel: viewModel,
+                                host: $host,
+                                port: $port,
+                                isPresented: $showConnectionSettings
+                            )
+                            .presentationCompactAdaptation(.popover)
                         }
                     }
                 }
             }
-            .navigationViewStyle(.stack)
-            .preferredColorScheme(.dark)
-            .onAppear {
-                // ----> FIX: Delay to allow initialization <----
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    isLoading = false
-                }
+        }
+        .navigationViewStyle(.stack)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isLoading = false
             }
         }
-    
-    // MARK: - Subviews
+    }
     
     private var interactiveDisplayArea: some View {
         ZStack {
@@ -78,11 +68,27 @@ struct RadioView: View {
                 let currentMin = viewModel.isAutoScaleEnabled ? viewModel.dspEngine.dynamicMinDb : viewModel.manualMinDb
                 let currentMax = viewModel.isAutoScaleEnabled ? viewModel.dspEngine.dynamicMaxDb : viewModel.manualMaxDb
                 
-                SpectrogramView(data: viewModel.dspEngine.spectrum, minDb: currentMin, maxDb: currentMax)
-                    .background(Color.black).cornerRadius(8)
+                // ----> FIX: Make sure these views observe the DSP engine directly <----
+                SpectrogramView(
+                    data: viewModel.dspEngine.spectrum,
+                    minDb: currentMin,
+                    maxDb: currentMax
+                )
+                .background(Color.black)
+                .cornerRadius(8)
+                // ----> ADD: Force view updates <----
+                .id("spectrogram-\(viewModel.dspEngine.spectrum.count)")
                 
-                WaterfallView(data: viewModel.dspEngine.waterfallData, minDb: currentMin, maxDb: currentMax)
-                    .background(Color.black).cornerRadius(8).frame(height: 200)
+                WaterfallView(
+                    data: viewModel.dspEngine.waterfallData,
+                    minDb: currentMin,
+                    maxDb: currentMax
+                )
+                .background(Color.black)
+                .cornerRadius(8)
+                .frame(height: 200)
+                // ----> ADD: Force view updates <----
+                .id("waterfall-\(viewModel.dspEngine.waterfallData.count)")
             }
             
             TuningIndicatorView(
@@ -102,20 +108,34 @@ struct RadioView: View {
         }
         .padding(.horizontal)
         .gesture(displayAreaGestures)
+        // ----> ADD: Debug overlay <----
+        .overlay(
+            VStack {
+                HStack {
+                    Text("Spectrum: \(viewModel.dspEngine.spectrum.count)")
+                    Spacer()
+                    Text("Waterfall: \(viewModel.dspEngine.waterfallData.count)")
+                }
+                .font(.caption)
+                .foregroundColor(.gray)
+                .padding(.horizontal)
+                Spacer()
+            }
+        )
     }
     
     private var controlsTabView: some View {
         TabView {
-                TuningControlsView(
-                    squelchLevel: $viewModel.squelchLevel,
-                    frequencyMHz: $viewModel.settings.frequencyMHz,
-                    frequencyStep: $viewModel.frequencyStep,
-                    isFrequencyFieldFocused: $isFrequencyFieldFocused,
-                    vfoBandwidthHz: $viewModel.vfoBandwidthHz,
-                    viewModel: viewModel  // Add this line
-                )
-                .tabItem { Image(systemName: "tuningfork"); Text("Tuning") }
-            
+            TuningControlsView(
+                squelchLevel: $viewModel.squelchLevel,
+                frequencyMHz: $viewModel.settings.frequencyMHz,
+                frequencyStep: $viewModel.frequencyStep,
+                isFrequencyFieldFocused: $isFrequencyFieldFocused,
+                vfoBandwidthHz: $viewModel.vfoBandwidthHz,
+                viewModel: viewModel
+            )
+            .tabItem { Image(systemName: "tuningfork"); Text("Tuning") }
+        
             DSPControlsView(
                 isAutoScaleEnabled: $viewModel.isAutoScaleEnabled,
                 manualMinDb: $viewModel.manualMinDb,
@@ -125,32 +145,12 @@ struct RadioView: View {
                 waterfallHeight: $viewModel.waterfallHeight
             )
             .tabItem { Image(systemName: "dial.medium"); Text("DSP") }
-            
+        
             HardwareControlsView(
                 settings: $viewModel.settings,
                 selectedSampleRate: $viewModel.selectedSampleRate
             )
             .tabItem { Image(systemName: "memorychip"); Text("Hardware") }
-        }
-    }
-    
-    private var connectionStatusArea: some View {
-        VStack {
-            HStack {
-                Circle().frame(width: 20, height: 20).foregroundColor(viewModel.client.isConnected ? .green : .red)
-                Text(viewModel.client.isConnected ? "Connected" : "Disconnected")
-            }
-            .padding(.top, 5)
-
-            HStack(spacing: 30) {
-                Button("Connect") { viewModel.setupAndConnect(host: host, port: port) }
-                    .font(.title2)
-                    .disabled(viewModel.client.isConnected)
-                
-                Button("Disconnect") { viewModel.client.disconnect() }
-                    .font(.title2)
-                    .disabled(!viewModel.client.isConnected)
-            }
         }
     }
     
