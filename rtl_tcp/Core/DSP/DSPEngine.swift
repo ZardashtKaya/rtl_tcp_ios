@@ -500,10 +500,13 @@ class DSPEngine: ObservableObject {
         let sampleCount = iqSamples.count / 2
         
         // Shift the desired channel to baseband (DC) by multiplying by e^{-j2πf_shift*t}.
-        // tuningOffset 0.5 → DC (no shift), <0.5 → lower half, >0.5 → upper half.
+        // tuningOffset maps [0,1] → [-0.5, +0.5] of sampleRateHz:
+        //   0.5 → 0 Hz shift (desired channel already at DC, pass through unchanged)
+        //   <0.5 → shift from lower sideband to DC
+        //   >0.5 → shift from upper sideband to DC
         let shiftFreqHz = (Double(tuningOffset) - 0.5) * sampleRateHz
         
-        // When shift is zero, pass through unchanged.
+        // When shift is zero, the desired channel is already at DC — pass through unchanged.
         guard shiftFreqHz != 0.0 else { return iqSamples }
         
         let theta0 = Float(2.0 * .pi * shiftFreqHz / sampleRateHz)

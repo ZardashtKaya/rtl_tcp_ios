@@ -11,7 +11,7 @@ struct RadioView: View {
     @StateObject private var viewModel = RadioViewModel()
     @State private var isLoading = true
     
-    @AppStorage("connectionHost") private var host: String = ""
+    @AppStorage("connectionHost") private var host: String = "localhost"
     @AppStorage("connectionPort") private var port: String = "1234"
     
     @GestureState private var dragAmount: CGFloat = 0
