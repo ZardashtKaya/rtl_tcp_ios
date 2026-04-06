@@ -85,11 +85,7 @@ class CircularBuffer {
         writeIndex = 0
         readIndex = 0
         overflowCount = 0
-        
-        // Clear the buffer
-        for i in 0..<bufferSize {
-            buffer[i] = 0.0
-        }
+        buffer = [Float](repeating: 0.0, count: bufferSize)
         
         print("🔄 Circular buffer reset")
     }

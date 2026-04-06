@@ -15,8 +15,12 @@ class NFMDemodulator: Demodulator {
     private var lastQ: Float = 0.0
     
     private var firFilter: [Float] = []
+    // Pre-computed reversed FIR filter so we avoid re-allocating on every call.
+    private var reversedFIRFilter: [Float] = []
     private var resamplerInputBuffer: [Float] = []
     private var resamplerRatio: Double = 1.0
+    private var currentSampleRateHz: Double = 2_048_000.0
+    private var currentDecimationFactor: Int = 10
     
     // ----> FIX: Initialize buffers properly <----
     private var filteredBuffer: [Float] = []
@@ -40,13 +44,16 @@ class NFMDemodulator: Demodulator {
         print("🎛️ NFM Demodulator updating...")
         
         self.squelchLevel = powf(squelchLevel, 2) * 0.01
+        self.currentSampleRateHz = sampleRateHz
         
         let audioBandwidth = 8000.0
         self.firFilter = designLowPassFIR(sampleRate: sampleRateHz, cutoffFrequency: audioBandwidth, length: 65)
+        // Pre-compute the reversed filter once here instead of on every demodulate call.
+        self.reversedFIRFilter = firFilter.reversed()
         
         let targetIntermediateRate = 200000.0
-        let decimationFactor = max(1, Int(floor(sampleRateHz / targetIntermediateRate)))
-        let intermediateSampleRate = sampleRateHz / Double(decimationFactor)
+        self.currentDecimationFactor = max(1, Int(floor(sampleRateHz / targetIntermediateRate)))
+        let intermediateSampleRate = sampleRateHz / Double(currentDecimationFactor)
         self.resamplerRatio = AudioManager.audioSampleRate / intermediateSampleRate
         
         // ----> FIX: Limit and reset resampler buffer safely <----
@@ -66,7 +73,7 @@ class NFMDemodulator: Demodulator {
         
         self.isInitialized = true
         
-        print("🎛️ NFM Demodulator updated: SR=\(sampleRateHz), BW=\(bandwidthHz), Decimation=\(decimationFactor)")
+        print("🎛️ NFM Demodulator updated: SR=\(sampleRateHz), BW=\(bandwidthHz), Decimation=\(currentDecimationFactor)")
     }
 
     func demodulate(frequencyBand iqSamples: [Float]) -> [Float] {
@@ -82,10 +89,7 @@ class NFMDemodulator: Demodulator {
         
         let filteredIQ = applyFIROptimized(input: inputSamples)
         
-        let targetIntermediateRate = 200000.0
-        let decimationFactor = max(1, Int(floor(2_048_000.0 / targetIntermediateRate)))
-        
-        let decimatedIQ = decimateOptimized(input: filteredIQ, factor: decimationFactor)
+        let decimatedIQ = decimateOptimized(input: filteredIQ, factor: currentDecimationFactor)
         
         let sampleCount = decimatedIQ.count / 2
         guard sampleCount > 0 else {
@@ -214,10 +218,10 @@ class NFMDemodulator: Demodulator {
             }
         }
         
-        // Apply convolution with bounds checking
-        if inputCount > 0 && !firFilter.isEmpty {
-            vDSP_conv(realInput, 1, firFilter.reversed(), 1, &realOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
-            vDSP_conv(imagInput, 1, firFilter.reversed(), 1, &imagOutput, 1, vDSP_Length(inputCount), vDSP_Length(firFilter.count))
+        // Apply convolution using the pre-computed reversed filter.
+        if inputCount > 0 && !reversedFIRFilter.isEmpty {
+            vDSP_conv(realInput, 1, reversedFIRFilter, 1, &realOutput, 1, vDSP_Length(inputCount), vDSP_Length(reversedFIRFilter.count))
+            vDSP_conv(imagInput, 1, reversedFIRFilter, 1, &imagOutput, 1, vDSP_Length(inputCount), vDSP_Length(reversedFIRFilter.count))
         }
         
         // Interleave output with bounds checking

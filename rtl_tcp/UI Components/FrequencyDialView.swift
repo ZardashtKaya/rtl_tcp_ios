@@ -41,24 +41,19 @@ struct FrequencyDialView: View {
             }
     }
     
-    // This gesture handles the live update and animation.
     var updateDragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .updating($dragTranslation) { value, state, _ in
                 state = value.translation.width
                 
                 if let startFreq = startDragFrequency {
-                    let pixelPerHz = 0.05 // Sensitivity
+                    let pixelPerHz = 0.05
                     let frequencyChangeHz = -value.translation.width * (1 / pixelPerHz) * step.rawValue
                     let frequencyChangeMHz = frequencyChangeHz / 1_000_000
                     
                     var newFrequency = startFreq + frequencyChangeMHz
                     newFrequency = max(0, min(1700, newFrequency))
-                    
-                    // Use DispatchQueue to avoid potential view update conflicts within a gesture
-                    DispatchQueue.main.async {
-                        self.frequencyMHz = newFrequency
-                    }
+                    self.frequencyMHz = newFrequency
                 }
             }
             .onEnded { _ in
