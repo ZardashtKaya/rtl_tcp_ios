@@ -14,4 +14,7 @@ protocol Demodulator {
 
     // Allows the DSPEngine to configure the demodulator's parameters.
     func update(bandwidthHz: Double, sampleRateHz: Double, squelchLevel: Float)
+
+    // Resets transient demodulator state when a new connection is established.
+    func resetForConnection()
 }

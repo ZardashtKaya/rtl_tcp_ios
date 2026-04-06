@@ -11,8 +11,8 @@ struct RadioView: View {
     @StateObject private var viewModel = RadioViewModel()
     @State private var isLoading = true
     
-    @State private var host: String = "zardashtmac.local"
-    @State private var port: String = "1234"
+    @AppStorage("connectionHost") private var host: String = "localhost"
+    @AppStorage("connectionPort") private var port: String = "1234"
     
     @GestureState private var dragAmount: CGFloat = 0
     @GestureState private var magnificationAmount: CGFloat = 1.0
@@ -76,8 +76,6 @@ struct RadioView: View {
                 )
                 .background(Color.black)
                 .cornerRadius(8)
-                // ----> ADD: Force view updates <----
-                .id("spectrogram-\(viewModel.dspEngine.spectrum.count)")
                 
                 WaterfallView(
                     data: viewModel.dspEngine.waterfallData,
@@ -87,8 +85,6 @@ struct RadioView: View {
                 .background(Color.black)
                 .cornerRadius(8)
                 .frame(height: 200)
-                // ----> ADD: Force view updates <----
-                .id("waterfall-\(viewModel.dspEngine.waterfallData.count)")
             }
             
             TuningIndicatorView(
@@ -108,20 +104,6 @@ struct RadioView: View {
         }
         .padding(.horizontal)
         .gesture(displayAreaGestures)
-        // ----> ADD: Debug overlay <----
-        .overlay(
-            VStack {
-                HStack {
-                    Text("Spectrum: \(viewModel.dspEngine.spectrum.count)")
-                    Spacer()
-                    Text("Waterfall: \(viewModel.dspEngine.waterfallData.count)")
-                }
-                .font(.caption)
-                .foregroundColor(.gray)
-                .padding(.horizontal)
-                Spacer()
-            }
-        )
     }
     
     private var controlsTabView: some View {

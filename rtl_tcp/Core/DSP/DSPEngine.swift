@@ -23,7 +23,6 @@ class DSPEngine: ObservableObject {
     
     private let dspQueue = DispatchQueue(label: "com.zardashtkaya.rtltcp.dsp", qos: .userInitiated)
     private var isProcessing = false
-    private var isUpdatingUI = false
     
     private var sampleBuffer = Data()
     private let sampleBufferLock = NSLock()
@@ -47,6 +46,11 @@ class DSPEngine: ObservableObject {
     private var floatSamples: [Float] = []
     private var realSquared: [Float] = []
     private var imagSquared: [Float] = []
+    // Reusable temp buffers for performFFT — allocated once in initializeBuffers.
+    private var fftTempRealSquared: [Float] = []
+    private var fftTempImagSquared: [Float] = []
+    private var fftTempMagSquared: [Float] = []
+    private var fftTempDbMagnitudes: [Float] = []
     private let uint8ToFloatLUT: [Float]
     
     var demodulator: Demodulator
@@ -62,28 +66,10 @@ class DSPEngine: ObservableObject {
     private let minUIUpdateInterval: TimeInterval = 1.0 / 30.0
     private var pendingUIUpdate = false
     
-    // ----> ADD: Initialization flag <----
     private var isInitialized = false
-    private var fftErrorCount = 0
-    private let maxFFTErrors = 10
 
     private func performFFTSafely(on samples: [Float]) -> [Float] {
-        if fftErrorCount >= maxFFTErrors {
-            // Return empty array if too many errors
-            return []
-        }
-        
-        do {
-            let result = performFFT(on: samples)
-            if !result.isEmpty {
-                fftErrorCount = 0 // Reset error count on success
-            }
-            return result
-        } catch {
-            fftErrorCount += 1
-            print("⚠️ FFT error \(fftErrorCount)/\(maxFFTErrors): \(error)")
-            return []
-        }
+        return performFFT(on: samples)
     }
     
 
@@ -147,6 +133,10 @@ class DSPEngine: ObservableObject {
         self.floatSamples = Array(repeating: 0.0, count: fftSize * 4)
         self.realSquared = Array(repeating: 0.0, count: fftSize)
         self.imagSquared = Array(repeating: 0.0, count: fftSize)
+        self.fftTempRealSquared = Array(repeating: 0.0, count: fftSize)
+        self.fftTempImagSquared = Array(repeating: 0.0, count: fftSize)
+        self.fftTempMagSquared  = Array(repeating: 0.0, count: fftSize)
+        self.fftTempDbMagnitudes = Array(repeating: 0.0, count: fftSize)
         self.waterfallData = Array(repeating: spectrum, count: waterfallHeight)
         
         // Verify allocation
@@ -198,14 +188,7 @@ class DSPEngine: ObservableObject {
 
     deinit {
         print("🗑️ DSPEngine deinit")
-        // Make sure we're on the main thread for cleanup
-        if Thread.isMainThread {
-            cleanupFFT()
-        } else {
-            DispatchQueue.main.sync {
-                cleanupFFT()
-            }
-        }
+        cleanupFFT()
     }
 
     
@@ -239,11 +222,9 @@ class DSPEngine: ObservableObject {
             lastCleanupTime = Date()
         }
         
-        // ----> FIX: Only process if not already processing <----
-        if !isProcessing {
-            dspQueue.async { [weak self] in
-                self?.runDspLoop()
-            }
+        // Always enqueue onto the serial dspQueue; runDspLoop guards against concurrent execution.
+        dspQueue.async { [weak self] in
+            self?.runDspLoop()
         }
     }
     
@@ -372,22 +353,24 @@ class DSPEngine: ObservableObject {
     }
     
     private func scheduleUIUpdate() {
-        let now = Date()
-        let timeSinceLastUpdate = now.timeIntervalSince(lastUIUpdateTime)
-        
-        if timeSinceLastUpdate >= minUIUpdateInterval && !pendingUIUpdate {
-            pendingUIUpdate = true
-            lastUIUpdateTime = now
+        // All access to pendingUIUpdate and lastUIUpdateTime must be on the main thread.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.pendingUIUpdate else { return }
             
-            DispatchQueue.main.async { [weak self] in
-                self?.updateUI()
-            }
-        } else if !pendingUIUpdate {
-            pendingUIUpdate = true
-            let delay = minUIUpdateInterval - timeSinceLastUpdate
+            let now = Date()
+            let timeSinceLastUpdate = now.timeIntervalSince(self.lastUIUpdateTime)
             
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.updateUI()
+            if timeSinceLastUpdate >= self.minUIUpdateInterval {
+                self.pendingUIUpdate = true
+                self.lastUIUpdateTime = now
+                self.updateUI()
+            } else {
+                self.pendingUIUpdate = true
+                let delay = self.minUIUpdateInterval - timeSinceLastUpdate
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.updateUI()
+                }
             }
         }
     }
@@ -449,7 +432,6 @@ class DSPEngine: ObservableObject {
         }
     }
     
-    // ----> FIX: Add safety checks to FFT <----
     private func performFFT(on samples: [Float]) -> [Float] {
         guard samples.count == fftSize * 2,
               let setup = fftSetup else {
@@ -457,101 +439,53 @@ class DSPEngine: ObservableObject {
             return []
         }
         
-        // Ensure all buffers are the correct size
         guard fftInputReal.count == fftSize,
               fftInputImag.count == fftSize,
               fftOutputReal.count == fftSize,
               fftOutputImag.count == fftSize,
-              magSquared.count == fftSize,
-              dbMagnitudes.count == fftSize,
-              finalMagnitudes.count == fftSize else {
+              fftTempRealSquared.count == fftSize,
+              fftTempImagSquared.count == fftSize,
+              fftTempMagSquared.count == fftSize,
+              fftTempDbMagnitudes.count == fftSize else {
             print("⚠️ Buffer size mismatch in FFT")
             return []
         }
         
-        // Deinterleave samples safely
+        // Deinterleave samples into pre-allocated split-complex buffers.
         for i in 0..<fftSize {
-            let realIndex = i * 2
-            let imagIndex = i * 2 + 1
-            
-            if realIndex < samples.count && imagIndex < samples.count {
-                fftInputReal[i] = samples[realIndex]
-                fftInputImag[i] = samples[imagIndex]
-            } else {
-                fftInputReal[i] = 0.0
-                fftInputImag[i] = 0.0
-            }
+            fftInputReal[i] = samples[i * 2]
+            fftInputImag[i] = samples[i * 2 + 1]
         }
         
-        // ----> SAFER FFT APPROACH: Use vDSP_fft_zrip instead <----
         let log2n = vDSP_Length(log2(Float(fftSize)))
         
-        // Create temporary arrays for the FFT operation
-        var tempReal = fftInputReal
-        var tempImag = fftInputImag
-        var outputReal = Array(repeating: Float(0.0), count: fftSize)
-        var outputImag = Array(repeating: Float(0.0), count: fftSize)
-        
-        tempReal.withUnsafeMutableBufferPointer { realPtr in
-            tempImag.withUnsafeMutableBufferPointer { imagPtr in
-                outputReal.withUnsafeMutableBufferPointer { outRealPtr in
-                    outputImag.withUnsafeMutableBufferPointer { outImagPtr in
-                        
-                        guard let realBase = realPtr.baseAddress,
-                              let imagBase = imagPtr.baseAddress,
-                              let outRealBase = outRealPtr.baseAddress,
-                              let outImagBase = outImagPtr.baseAddress else {
-                            print("⚠️ FFT buffer pointer error")
-                            return
-                        }
-                        
-                        var input = DSPSplitComplex(realp: realBase, imagp: imagBase)
-                        var output = DSPSplitComplex(realp: outRealBase, imagp: outImagBase)
-                        
-                        // Use the safer FFT function
+        fftInputReal.withUnsafeMutableBufferPointer { realPtr in
+            fftInputImag.withUnsafeMutableBufferPointer { imagPtr in
+                fftOutputReal.withUnsafeMutableBufferPointer { outRealPtr in
+                    fftOutputImag.withUnsafeMutableBufferPointer { outImagPtr in
+                        var input  = DSPSplitComplex(realp: realPtr.baseAddress!, imagp: imagPtr.baseAddress!)
+                        var output = DSPSplitComplex(realp: outRealPtr.baseAddress!, imagp: outImagPtr.baseAddress!)
                         vDSP_fft_zop(setup, &input, 1, &output, 1, log2n, FFTDirection(kFFTDirection_Forward))
                     }
                 }
             }
         }
         
-        // Copy results back safely
-        for i in 0..<fftSize {
-            if i < outputReal.count && i < outputImag.count {
-                fftOutputReal[i] = outputReal[i]
-                fftOutputImag[i] = outputImag[i]
-            }
-        }
-        
-        // Calculate magnitudes using temporary arrays
-        var tempRealSquared = Array(repeating: Float(0.0), count: fftSize)
-        var tempImagSquared = Array(repeating: Float(0.0), count: fftSize)
-        var tempMagSquared = Array(repeating: Float(0.0), count: fftSize)
-        var tempDbMagnitudes = Array(repeating: Float(0.0), count: fftSize)
-        
-        vDSP.square(fftOutputReal, result: &tempRealSquared)
-        vDSP.square(fftOutputImag, result: &tempImagSquared)
-        vDSP.add(tempRealSquared, tempImagSquared, result: &tempMagSquared)
+        // Compute power spectrum in dB using pre-allocated temp buffers.
+        vDSP.square(fftOutputReal, result: &fftTempRealSquared)
+        vDSP.square(fftOutputImag, result: &fftTempImagSquared)
+        vDSP.add(fftTempRealSquared, fftTempImagSquared, result: &fftTempMagSquared)
         
         let epsilon: Float = 1e-10
-        vDSP.add(epsilon, tempMagSquared, result: &tempMagSquared)
-        vDSP.convert(power: tempMagSquared, toDecibels: &tempDbMagnitudes, zeroReference: 1.0)
+        vDSP.add(epsilon, fftTempMagSquared, result: &fftTempMagSquared)
+        vDSP.convert(power: fftTempMagSquared, toDecibels: &fftTempDbMagnitudes, zeroReference: 1.0)
         
-        // FFT shift with bounds checking
+        // FFT shift: swap lower and upper halves so DC is in the centre.
         let halfSize = fftSize / 2
-        guard halfSize > 0 && halfSize < fftSize else {
-            print("⚠️ FFT shift bounds error")
-            return []
-        }
-        
-        // Create result array
-        var result = Array(repeating: Float(0.0), count: fftSize)
-        
+        var result = [Float](repeating: 0.0, count: fftSize)
         for i in 0..<halfSize {
-            if halfSize + i < tempDbMagnitudes.count && i < result.count && halfSize + i < result.count {
-                result[i] = tempDbMagnitudes[halfSize + i]
-                result[halfSize + i] = tempDbMagnitudes[i]
-            }
+            result[i]            = fftTempDbMagnitudes[halfSize + i]
+            result[halfSize + i] = fftTempDbMagnitudes[i]
         }
         
         return result
@@ -564,81 +498,58 @@ class DSPEngine: ObservableObject {
         }
         
         let sampleCount = iqSamples.count / 2
-        let centerFrequencyRatio = Double(tuningOffset)
-        let bandwidthRatio = vfoBandwidthHz / sampleRateHz
         
-        let centerSample = Int(centerFrequencyRatio * Double(sampleCount))
-        let halfBandwidthSamples = Int(bandwidthRatio * Double(sampleCount) / 2.0)
+        // Shift the desired channel to baseband (DC) by multiplying by e^{-j2πf_shift*t}.
+        // tuningOffset maps [0,1] → [-0.5, +0.5] of sampleRateHz:
+        //   0.5 → 0 Hz shift (desired channel already at DC, pass through unchanged)
+        //   <0.5 → shift from lower sideband to DC
+        //   >0.5 → shift from upper sideband to DC
+        let shiftFreqHz = (Double(tuningOffset) - 0.5) * sampleRateHz
         
-        let startSample = max(0, centerSample - halfBandwidthSamples)
-        let endSample = min(sampleCount, centerSample + halfBandwidthSamples)
+        // When shift is zero, the desired channel is already at DC — pass through unchanged.
+        guard shiftFreqHz != 0.0 else { return iqSamples }
         
-        guard startSample < endSample else {
-            return []
+        let theta0 = Float(2.0 * .pi * shiftFreqHz / sampleRateHz)
+        var output = [Float](repeating: 0.0, count: iqSamples.count)
+        
+        for i in 0..<sampleCount {
+            let theta = theta0 * Float(i)
+            let cosT = cosf(theta)
+            let sinT = sinf(theta)
+            let inI = iqSamples[i * 2]
+            let inQ = iqSamples[i * 2 + 1]
+            // Complex multiply by e^{-jθ} = cosθ - j·sinθ
+            output[i * 2]     = inI * cosT + inQ * sinT
+            output[i * 2 + 1] = inQ * cosT - inI * sinT
         }
         
-        var bandSamples = [Float]()
-        bandSamples.reserveCapacity((endSample - startSample) * 2)
-        
-        for i in startSample..<endSample {
-            bandSamples.append(iqSamples[i * 2])
-            bandSamples.append(iqSamples[i * 2 + 1])
-        }
-        
-        return bandSamples
+        return output
     }
     
-    // ----> FIX: Make parameter updates safer <----
     public func updateParameters(fftSize: Int, averagingCount: Int, waterfallHeight: Int) {
         print("🔄 Updating parameters: FFT=\(fftSize), Avg=\(averagingCount), Height=\(waterfallHeight)")
         
-        let semaphore = DispatchSemaphore(value: 0)
-        
         dspQueue.async { [weak self] in
-            guard let self = self else {
-                semaphore.signal()
-                return
-            }
+            guard let self = self else { return }
             
-            // Wait for any current processing to finish
-            var waitCount = 0
-            while self.isProcessing && waitCount < 100 {
-                Thread.sleep(forTimeInterval: 0.01)
-                waitCount += 1
-            }
-            
-            if waitCount >= 100 {
-                print("⚠️ Timeout waiting for processing to stop")
-            }
-            
-            // Clear buffers
             self.averagingBuffer.removeAll(keepingCapacity: false)
             self.sampleBufferLock.lock()
             self.sampleBuffer.removeAll(keepingCapacity: false)
             self.sampleBufferLock.unlock()
             
-            // Update simple parameters first
             if waterfallHeight != self.waterfallHeight {
                 self.waterfallHeight = waterfallHeight
             }
             
             self.averagingCount = averagingCount
             
-            // Handle FFT size change carefully
             if fftSize != self.fftSize {
                 print("🔄 Changing FFT size from \(self.fftSize) to \(fftSize)")
-                
-                // Clean up old FFT setup safely
                 self.cleanupFFT()
-                
-                // Update size
                 self.fftSize = fftSize
-                
-                // Reinitialize everything
                 self.initializeBuffers()
                 self.setupFFT()
                 
-                // Update UI on main thread
                 DispatchQueue.main.async {
                     self.spectrum = Array(repeating: -120.0, count: self.fftSize)
                     self.waterfallData = Array(repeating: self.spectrum, count: self.waterfallHeight)
@@ -646,14 +557,6 @@ class DSPEngine: ObservableObject {
                 }
             }
             
-            semaphore.signal()
-        }
-        
-        // Wait with timeout
-        let result = semaphore.wait(timeout: .now() + 5.0)
-        if result == .timedOut {
-            print("⚠️ Parameter update timed out")
-        } else {
             print("✅ Parameters updated successfully")
         }
     }
@@ -713,12 +616,7 @@ class DSPEngine: ObservableObject {
         dspQueue.async { [weak self] in
             guard let self = self else { return }
             
-            // Wait for any current processing to finish
-            while self.isProcessing {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            
-            // Clear all buffers
+            // Clear all buffers (isProcessing is guaranteed false here since dspQueue is serial).
             self.sampleBufferLock.lock()
             self.sampleBuffer.removeAll(keepingCapacity: true)
             self.sampleBufferLock.unlock()
@@ -728,13 +626,12 @@ class DSPEngine: ObservableObject {
             // Reset counters
             self.processedChunks = 0
             self.lastCleanupTime = Date()
-            self.lastUIUpdateTime = Date()
-            self.pendingUIUpdate = false
             
             // Reset audio manager
             self.audioManager.resetForConnection()
             
             // Reset demodulator
+            self.demodulator.resetForConnection()
             self.demodulator.update(
                 bandwidthHz: self.vfoBandwidthHz,
                 sampleRateHz: self.sampleRateHz,
@@ -747,6 +644,8 @@ class DSPEngine: ObservableObject {
                 self.waterfallData = Array(repeating: self.spectrum, count: self.waterfallHeight)
                 self.dynamicMinDb = -90.0
                 self.dynamicMaxDb = -10.0
+                self.lastUIUpdateTime = Date()
+                self.pendingUIUpdate = false
             }
             
             print("🔧 DSP engine reset complete")
@@ -759,12 +658,7 @@ class DSPEngine: ObservableObject {
         dspQueue.async { [weak self] in
             guard let self = self else { return }
             
-            // Wait for any current processing to finish
-            while self.isProcessing {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            
-            // Clear all buffers
+            // Clear all buffers (isProcessing is guaranteed false here since dspQueue is serial).
             self.sampleBufferLock.lock()
             self.sampleBuffer.removeAll(keepingCapacity: true)
             self.sampleBufferLock.unlock()

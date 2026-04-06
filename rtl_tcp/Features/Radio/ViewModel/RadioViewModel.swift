@@ -67,12 +67,23 @@ class RadioViewModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
-            // Reset DSP engine and audio system
+            // Reset DSP engine and audio system (also calls demodulator.resetForConnection() via protocol).
             self.dspEngine.resetForConnection()
             
-            // Reset demodulator if it has a reset method
-            if let nfmDemod = self.dspEngine.demodulator as? NFMDemodulator {
-                nfmDemod.resetForConnection()
+            // Send initial hardware configuration once the DSP reset is queued.
+            DispatchQueue.main.async {
+                print("🔗 Sending initial configuration...")
+                self.client.setSampleRate(self.selectedSampleRate.rawValue)
+                self.client.setFrequency(UInt32(self.settings.frequencyMHz * 1_000_000))
+                self.client.setAgcMode(isOn: self.settings.isAgcOn)
+                if !self.settings.isAgcOn {
+                    self.client.setTunerGain(byIndex: self.settings.tunerGainIndex)
+                }
+                self.client.setBiasTee(isOn: self.settings.isBiasTeeOn)
+                self.client.setOffsetTuning(isOn: self.settings.isOffsetTuningOn)
+                self.dspEngine.setVFO(bandwidthHz: self.vfoBandwidthHz)
+                self.dspEngine.setSquelch(level: self.squelchLevel)
+                print("🔗 Initial configuration sent")
             }
             
             print("🔗 Audio system initialized for connection")
@@ -165,6 +176,7 @@ class RadioViewModel: ObservableObject {
         $vfoBandwidthHz
             .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
             .removeDuplicates()
+            .map { max(5_000, min(250_000, $0)) }
             .sink { [weak self] bandwidth in
                 self?.dspEngine.setVFO(bandwidthHz: bandwidth)
             }
@@ -199,33 +211,14 @@ class RadioViewModel: ObservableObject {
     }
     
     func setupAndConnect(host: String, port: String) {
-        // ----> FIX: Set up data handler before connecting <----
         client.onDataReceived = { [weak self] data in
             self?.dspEngine.process(data: data)
         }
         
         guard let portNumber = UInt16(port) else { return }
         client.connect(host: host, port: portNumber)
-        
-        // ----> FIX: Wait for connection and initialization <----
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self = self, self.client.isConnected else { return }
-            
-            print("🔗 Sending initial configuration...")
-            
-            self.client.setSampleRate(self.selectedSampleRate.rawValue)
-            self.client.setFrequency(UInt32(self.settings.frequencyMHz * 1_000_000))
-            self.client.setAgcMode(isOn: self.settings.isAgcOn)
-            if !self.settings.isAgcOn {
-                self.client.setTunerGain(byIndex: self.settings.tunerGainIndex)
-            }
-            self.client.setBiasTee(isOn: self.settings.isBiasTeeOn)
-            self.client.setOffsetTuning(isOn: self.settings.isOffsetTuningOn)
-            self.dspEngine.setVFO(bandwidthHz: self.vfoBandwidthHz)
-            self.dspEngine.setSquelch(level: self.squelchLevel)
-            
-            print("🔗 Initial configuration sent")
-        }
+        // Initial settings are sent by handleConnectionEstablished() once the
+        // NWConnection reports .ready — no timed guess needed.
     }
     
     private func callUpdateParameters(fftSize: Int, averagingCount: Int, waterfallHeight: Int) {
